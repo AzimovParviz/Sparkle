@@ -28,6 +28,7 @@
     id _textViewSwitchedToTextKit1Observer;
 #endif
     NSArray<NSString *> *_customAllowedURLSchemes;
+    NSTextFinder *_textFinder;
     
     SUAppcastItem *_updateItem;
     SUHost *_host;
@@ -80,6 +81,9 @@
         }
         
         _textView.delegate = self;
+//        _textFinder = [[NSTextFinder alloc] init];
+//        _textFinder.client = self;
+//        _textFinder.self.findBarContainer = _scrollView.enclosingScrollView;
         _scrollView.documentView = _textView;
     }
     return self;
@@ -456,6 +460,7 @@ static NSAttributedString *formatMarkdownAttributedString(NSAttributedString *or
     
     return NO;
 }
+
 - (NSString *)string {
     // Return the searchable text content from your web view or data model
     return _textView.string;
@@ -484,6 +489,19 @@ static NSAttributedString *formatMarkdownAttributedString(NSAttributedString *or
     return nil;
 }
 
+- (void)performFindPanelAction:(id)sender {
+    // Handles menu items and keyboard shortcuts (like Cmd+F)
+    [_textFinder performAction:(NSTextFinderAction)[(__kindof NSView *)sender tag]];
+}
+
+- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+    if ([item action] == @selector(performFindPanelAction:)) {
+        // Enable find actions when the view is active/selectable
+        return YES;
+    }
+    
+    return NO;
+}
 
 @end
 

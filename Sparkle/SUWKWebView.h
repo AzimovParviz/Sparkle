@@ -8,6 +8,7 @@
 
 #if SPARKLE_BUILD_UI_BITS
 
+#import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import "SUReleaseNotesView.h"
 
