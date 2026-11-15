@@ -66,6 +66,7 @@ typedef NS_ENUM(NSInteger, SUReleaseNotesFormat)
     IBOutlet NSView *_releaseNotesContentView;
     IBOutlet NSButton *_automaticallyInstallUpdatesButton;
     IBOutlet NSView *_titleView;
+    IBOutlet NSTextFinder *_textFinder;
     
     void (^_didBecomeKeyBlock)(void);
     void(^_completionBlock)(SPUUserUpdateChoice, NSRect, BOOL);
@@ -330,6 +331,8 @@ typedef NS_ENUM(NSInteger, SUReleaseNotesFormat)
     }
     
     id<SPUStandardUserDriverDelegate> delegate = _delegate;
+    _textFinder = [[NSTextFinder alloc] init];
+    
     switch (usedReleaseNotesFormat) {
         case SUReleaseNotesFormatPlainText:
             _releaseNotesView = [[SUTextViewReleaseNotesView alloc] initWithFontPointSize:defaultFontSize appcastItem:_updateItem host:_host delegate:delegate prefersMarkdown:NO customAllowedURLSchemes:customAllowedURLSchemes];
@@ -355,6 +358,7 @@ typedef NS_ENUM(NSInteger, SUReleaseNotesFormat)
             BOOL useWKWebView = !SPUXPCServiceIsEnabled(SUEnableDownloaderServiceKey);
             if (!useWKWebView) {
                 _releaseNotesView = [[SULegacyWebView alloc] initWithColorStyleSheetLocation:colorStyleURL fontFamily:defaultFontFamily fontPointSize:defaultFontSize javaScriptEnabled:javaScriptEnabled customAllowedURLSchemes:customAllowedURLSchemes];
+                _textFinder.client = _releaseNotesView;
             } else
 #endif
             {
@@ -373,11 +377,28 @@ typedef NS_ENUM(NSInteger, SUReleaseNotesFormat)
     _releaseNotesView.view.frame = _releaseNotesContentView.bounds;
     _releaseNotesView.view.autoresizingMask = (NSAutoresizingMaskOptions)(NSViewWidthSizable | NSViewHeightSizable);
     
+    _textFinder.client = _releaseNotesView;
+    _textFinder.self.findBarContainer = _releaseNotesView.view.enclosingScrollView;
+
     // We need a transparent background
     // This avoids a "white flash" that may be present when the webview initially loads in dark mode
     // This also is necessary for macOS 10.14, otherwise the background may stay white on 10.14 (but not in later OS's)
     [_releaseNotesView setDrawsBackground:NO];
 }
+
+- (void)performFindPanelAction:(id)sender {
+    // Handles menu items and keyboard shortcuts (like Cmd+F)
+    [_textFinder performAction:[sender tag]];
+}
+
+- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
+    if ([item action] == @selector(performFindPanelAction:)) {
+        // Enable find actions when the view is active/selectable
+        return YES;
+    }
+    return [super validateUserInterfaceItem:item];
+}
+
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSString *,id> *)change context:(void *)context
 {

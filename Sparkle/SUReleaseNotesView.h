@@ -8,13 +8,14 @@
 
 #if SPARKLE_BUILD_UI_BITS
 
+#import "AppKit/AppKit.h"
 #import <Foundation/Foundation.h>
 
 @class NSView;
 
 NS_ASSUME_NONNULL_BEGIN
 
-@protocol SUReleaseNotesView <NSObject>
+@protocol SUReleaseNotesView <NSObject, NSTextFinderClient>
 
 @property (nonatomic, readonly) NSView *view;
 

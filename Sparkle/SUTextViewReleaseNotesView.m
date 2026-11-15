@@ -456,6 +456,34 @@ static NSAttributedString *formatMarkdownAttributedString(NSAttributedString *or
     
     return NO;
 }
+- (NSString *)string {
+    // Return the searchable text content from your web view or data model
+    return _textView.string;
+}
+
+- (NSRange)firstSelectedRange {
+    // Return the current selection range
+    return NSMakeRange(NSNotFound, 0);
+}
+
+- (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges {
+    // Handle setting selected ranges from the find bar
+}
+
+- (NSArray<NSValue *> *)rectsForCharacterRange:(NSRange)characterRange {
+    // Return an array of NSValue-wrapped NSRects corresponding to the character range
+    return @[];
+}
+
+- (void)scrollRangeToVisible:(NSRange)range {
+    // Scroll the view to make the found range visible
+}
+
+- (NSView *)contentViewATIndex:(NSInteger)characterIndex effectiveRange:(NSRangePointer)outRange {
+    // Return the view displaying the content
+    return nil;
+}
+
 
 @end
 
