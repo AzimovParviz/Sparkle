@@ -40,7 +40,9 @@
 
 static WKUserScript *makeUserScriptWithInjectedStyleSource(NSString *styleSource)
 {
+    // We must remove newlines when inserting the style source in this interpolated string below
     NSString *strippedStyleSource = [styleSource stringByReplacingOccurrencesOfString:@"\n" withString:@""];
+
     NSString *scriptSource = [NSString stringWithFormat:
         @"var style = document.createElement('style');\n"
         @"style.innerHTML = '%@'\n"
@@ -56,6 +58,7 @@ static WKUserScript *makeUserScriptWithInjectedStyleSource(NSString *styleSource
 
 static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseString)
 {
+    // Check that release string can be safely injected
     NSMutableCharacterSet *allowedCharacterSet = [NSMutableCharacterSet alphanumericCharacterSet];
     [allowedCharacterSet addCharactersInString:@"_.- "];
     if ([releaseString rangeOfCharacterFromSet:allowedCharacterSet.invertedSet].location != NSNotFound) {
@@ -63,6 +66,7 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
         return nil;
     }
 
+    // This script adds the `sparkle-installed-version` class to all elements which have a matching `data-sparkle-version` attribute
     NSString *scriptSource = [NSString stringWithFormat:
         @"document.querySelectorAll('[data-sparkle-version=\"%@\"]')\n"
         @".forEach(installedVersionElement =>\n"
@@ -82,11 +86,18 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
 {
     self = [super init];
     if (self != nil) {
+        // Synchronize with web view defaulting to drawing background to avoid unnecessary invocations in -setDrawsBackground:
         _drawsWebViewBackground = YES;
+
         _allowsLoadingExternalReferences = allowsLoadingExternalReferences;
         _customAllowedURLSchemes = customAllowedURLSchemes;
 
         WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+
+        // Note: this javaScriptEnabled property is deprecated in favor of another webpage preference property,
+        // that involves implementing a delegate method that is only available on macOS 11.. to get it properly working.
+        // To simplify things, just rely on deprecated property for now.
+        // Future reader: if you change how JS is disabled, please be sure to test that JS code is properly disabled in HTML release notes.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         configuration.preferences.javaScriptEnabled = javaScriptEnabled;
@@ -97,12 +108,17 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
         NSString *colorStyleContents = [NSString stringWithContentsOfURL:colorStyleSheetLocation encoding:NSUTF8StringEncoding error:&colorStyleContentsError];
 
         WKUserContentController *userContentController = [[WKUserContentController alloc] init];
+
         NSString *fontStyleContents = [NSString stringWithFormat:@"body { font-family: %@; font-size: %dpx; }", fontFamily, fontPointSize];
 
         NSString *finalStyleContents = (colorStyleContents == nil)
             ? fontStyleContents
             : [NSString stringWithFormat:@"%@ %@", fontStyleContents, colorStyleContents];
 
+        // Note: we can still execute javascript via WKUserScript even if javascript is otherwise disabled from the web content
+        // In fact, we must execute javascript to properly inject our default CSS style into the DOM
+        // Legacy WebView has exposed methods for custom stylesheets and default fonts,
+        // but WKWebView seems to forgo that type of API surface in favor of user scripts like this
         WKUserScript *userScriptWithInjectedStyleSource = makeUserScriptWithInjectedStyleSource(finalStyleContents);
         if (userScriptWithInjectedStyleSource != nil) {
             [userContentController addUserScript:userScriptWithInjectedStyleSource];
@@ -115,6 +131,7 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
 
         configuration.userContentController = userContentController;
 
+        // Create the web view with a non-zero initial frame or let autoresizing handle it
         NSRect initialFrame = NSMakeRect(0, 0, 400, 300);
         CGFloat searchBarHeight = 32.0;
 
@@ -134,6 +151,7 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
         _webView.navigationDelegate = self;
         _webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
+        // Wrap the WKWebView in an NSScrollView
         _scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, initialFrame.size.width, initialFrame.size.height - searchBarHeight)];
         _scrollView.documentView = _webView;
         _scrollView.hasVerticalScroller = YES;
@@ -182,6 +200,7 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
         return;
     }
 
+    // Block loading all external resources for signed appcasts & signed release notes
     NSString *encodedContentRuleList =
         @"[{\"trigger\": { \"url-filter\": \".*\" }, \"action\": { \"type\": \"block\" } }]";
 
@@ -218,6 +237,10 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
 - (void)setDrawsBackground:(BOOL)drawsBackground
 {
     if (_drawsWebViewBackground != drawsBackground) {
+        // Unfortunately we have to rely on a private API
+        // FB7539179: https://github.com/feedback-assistant/reports/issues/81 | https://bugs.webkit.org/show_bug.cgi?id=155550
+        // But it seems like others are already relying on it, passed App Review, and apps couldn't be broken due to compatibility
+        // Note: before we were using _setDrawsTransparentBackground < macOS 10.12
         if ([_webView respondsToSelector:@selector(_setDrawsBackground:)]) {
             [_webView _setDrawsBackground:drawsBackground];
         }
@@ -249,6 +272,7 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
             _completionHandler(error);
             _completionHandler = nil;
         }
+
         _currentNavigation = nil;
     }
 }
@@ -271,10 +295,12 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
     BOOL isAboutBlank = NO;
     BOOL safeURL = SUReleaseNotesIsSafeURL(requestURL, _customAllowedURLSchemes, &isAboutBlank);
 
+    // Do not allow redirects to dangerous protocols such as file://
     if (!safeURL) {
         SULog(SULogLevelDefault, @"Blocked display of %@ URL which may be dangerous", requestURL.scheme);
         decisionHandler(WKNavigationActionPolicyCancel);
     } else {
+        // Ensure we're finished loading
         if (_completionHandler == nil) {
             if (!isAboutBlank) {
                 [[NSWorkspace sharedWorkspace] openURL:requestURL];
