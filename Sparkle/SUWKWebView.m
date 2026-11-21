@@ -20,60 +20,20 @@
 - (void)_setDrawsTransparentBackground:(BOOL)drawsTransparentBackground;
 @end
 
-@class SUWKWebView;
-
-// Forward declarations so the subclass and wrapper know about each other
-@interface SUWKWebView ()
-- (void)performFindPanelAction:(id)sender;
-- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item;
-- (void)updateFindBarContainer;
-@end
-
-@interface SUInternalWKWebView : WKWebView
-@property (nonatomic, weak) SUWKWebView *parentWebViewWrapper;
-@end
-
-@implementation SUInternalWKWebView
-
-- (BOOL)acceptsFirstResponder {
-    return YES;
-}
-
-- (void)performFindPanelAction:(id)sender {
-    [self.parentWebViewWrapper performFindPanelAction:sender];
-}
-
-- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
-    return [self.parentWebViewWrapper validateUserInterfaceItem:item];
-}
-
-- (void)viewDidMoveToSuperview {
-    [super viewDidMoveToSuperview];
-    [self.parentWebViewWrapper updateFindBarContainer];
-}
-
-- (void)viewDidMoveToWindow {
-    [super viewDidMoveToWindow];
-    [self.parentWebViewWrapper updateFindBarContainer];
-}
-
-@end
-
-
-@interface SUWKWebView () <WKNavigationDelegate>
+@interface SUWKWebView () <WKNavigationDelegate, NSSearchFieldDelegate>
+- (void)performSearchAction:(id)sender;
 @end
 
 @implementation SUWKWebView
 {
-    SUInternalWKWebView *_webView;
+    NSView *_containerView;
+    NSSearchField *_searchField;
+    WKWebView *_webView;
     NSScrollView *_scrollView;
     WKNavigation *_currentNavigation;
     NSArray<NSString *> *_customAllowedURLSchemes;
-    NSTextFinder *_textFinder;
-    NSString *_cachedPlainTextString;
-    
+    WKFindConfiguration *_findConfiguration;
     void (^_completionHandler)(NSError * _Nullable);
-    
     BOOL _drawsWebViewBackground;
     BOOL _allowsLoadingExternalReferences;
 }
@@ -90,7 +50,7 @@ static WKUserScript *makeUserScriptWithInjectedStyleSource(NSString *styleSource
         @"} else {\n"
         @"\tdocument.head.appendChild(style)\n"
         @"}", strippedStyleSource];
-    
+
     return [[WKUserScript alloc] initWithSource:scriptSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
 }
 
@@ -102,94 +62,117 @@ static WKUserScript *makeUserScriptForExposingCurrentRelease(NSString *releaseSt
         SULog(SULogLevelDefault, @"warning: App version '%@' has characters unsafe for injection.", releaseString);
         return nil;
     }
-    
+
     NSString *scriptSource = [NSString stringWithFormat:
-        @"document.querySelectorAll(\'[data-sparkle-version=\"%@\"]\')\n"
+        @"document.querySelectorAll('[data-sparkle-version=\"%@\"]')\n"
         @".forEach(installedVersionElement =>\n"
         @"installedVersionElement.classList.add('sparkle-installed-version')\n"
         @");", releaseString];
-    
+
     return [[WKUserScript alloc] initWithSource:scriptSource injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES];
 }
 
-- (instancetype)initWithColorStyleSheetLocation:(NSURL *)colorStyleSheetLocation fontFamily:(NSString *)fontFamily fontPointSize:(int)fontPointSize javaScriptEnabled:(BOOL)javaScriptEnabled customAllowedURLSchemes:(NSArray<NSString *> *)customAllowedURLSchemes allowsLoadingExternalReferences:(BOOL)allowsLoadingExternalReferences installedVersion:(NSString *)installedVersion
+- (instancetype)initWithColorStyleSheetLocation:(NSURL *)colorStyleSheetLocation
+                                      fontFamily:(NSString *)fontFamily
+                                   fontPointSize:(int)fontPointSize
+                               javaScriptEnabled:(BOOL)javaScriptEnabled
+                         customAllowedURLSchemes:(NSArray<NSString *> *)customAllowedURLSchemes
+                   allowsLoadingExternalReferences:(BOOL)allowsLoadingExternalReferences
+                                installedVersion:(NSString *)installedVersion
 {
     self = [super init];
     if (self != nil) {
         _drawsWebViewBackground = YES;
         _allowsLoadingExternalReferences = allowsLoadingExternalReferences;
-        _cachedPlainTextString = @"";
-        
+        _customAllowedURLSchemes = customAllowedURLSchemes;
+
         WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         configuration.preferences.javaScriptEnabled = javaScriptEnabled;
 #pragma clang diagnostic pop
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = NO;
-        
+
         NSError *colorStyleContentsError = nil;
         NSString *colorStyleContents = [NSString stringWithContentsOfURL:colorStyleSheetLocation encoding:NSUTF8StringEncoding error:&colorStyleContentsError];
-        
+
         WKUserContentController *userContentController = [[WKUserContentController alloc] init];
         NSString *fontStyleContents = [NSString stringWithFormat:@"body { font-family: %@; font-size: %dpx; }", fontFamily, fontPointSize];
-        
-        NSString *finalStyleContents;
-        if (colorStyleContents == nil) {
-            finalStyleContents = fontStyleContents;
-        } else {
-            finalStyleContents = [NSString stringWithFormat:@"%@ %@", fontStyleContents, colorStyleContents];
-        }
-        
+
+        NSString *finalStyleContents = (colorStyleContents == nil)
+            ? fontStyleContents
+            : [NSString stringWithFormat:@"%@ %@", fontStyleContents, colorStyleContents];
+
         WKUserScript *userScriptWithInjectedStyleSource = makeUserScriptWithInjectedStyleSource(finalStyleContents);
         if (userScriptWithInjectedStyleSource != nil) {
             [userContentController addUserScript:userScriptWithInjectedStyleSource];
         }
-        
+
         WKUserScript *userScriptForExposingCurrentRelease = makeUserScriptForExposingCurrentRelease(installedVersion);
         if (userScriptForExposingCurrentRelease != nil) {
             [userContentController addUserScript:userScriptForExposingCurrentRelease];
         }
-        
+
         configuration.userContentController = userContentController;
-        
-        // Create the web view with a non-zero initial frame or let autoresizing handle it
-        _webView = [[SUInternalWKWebView alloc] initWithFrame:NSRectFromCGRect(CGRectMake(0, 0, 400, 300)) configuration:configuration];
-        _webView.parentWebViewWrapper = self;
+
+        NSRect initialFrame = NSMakeRect(0, 0, 400, 300);
+        CGFloat searchBarHeight = 32.0;
+
+        _containerView = [[NSView alloc] initWithFrame:initialFrame];
+        _containerView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+        _searchField = [[NSSearchField alloc] initWithFrame:NSMakeRect(8, initialFrame.size.height - searchBarHeight + 4, initialFrame.size.width - 16, 24)];
+        _searchField.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+        _searchField.placeholderString = @"Find in page";
+        _searchField.delegate = self;
+        _searchField.target = self;
+        _searchField.action = @selector(performSearchAction:);
+        _searchField.sendsWholeSearchString = YES;
+        _searchField.sendsSearchStringImmediately = NO;
+
+        _webView = [[WKWebView alloc] initWithFrame:NSMakeRect(0, 0, initialFrame.size.width, initialFrame.size.height - searchBarHeight) configuration:configuration];
         _webView.navigationDelegate = self;
         _webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-        // Wrap the WKWebView in an NSScrollView
-        _scrollView = [[NSScrollView alloc] initWithFrame:NSRectFromCGRect(CGRectMake(0, 0, 400, 300))];
+        _scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, initialFrame.size.width, initialFrame.size.height - searchBarHeight)];
         _scrollView.documentView = _webView;
         _scrollView.hasVerticalScroller = YES;
         _scrollView.hasHorizontalScroller = NO;
         _scrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-        
-        // Initialize NSTextFinder and assign client to self
-        _textFinder = [[NSTextFinder alloc] init];
-        _textFinder.client = self;
-        if (_scrollView != nil) {
-            printf("i exist");
-        } else {
-            printf("for fucks sake");
-        }
-        _textFinder.findBarContainer = _scrollView;
 
-        _customAllowedURLSchemes = customAllowedURLSchemes;
+        [_containerView addSubview:_scrollView];
+        [_containerView addSubview:_searchField];
+
+        _findConfiguration = [[WKFindConfiguration alloc] init];
+        _findConfiguration.caseSensitive = NO;
+        _findConfiguration.wraps = YES;
     }
     return self;
 }
 
-- (void)updateFindBarContainer {
-    if (_webView.enclosingScrollView != nil) {
-        _textFinder.findBarContainer = _webView.enclosingScrollView;
-    }
-}
-
 - (NSView *)view
 {
-//    return _webView;
-    return _scrollView;
+    return _containerView;
+}
+
+- (void)performSearchAction:(id)sender
+{
+    NSString *query = _searchField.stringValue;
+    if (query.length == 0) {
+        return;
+    }
+
+    // Hold Shift while pressing Return to search backwards
+    NSEventModifierFlags flags = [NSApp currentEvent].modifierFlags;
+    _findConfiguration.backwards = ((flags & NSEventModifierFlagShift) != 0);
+
+    [_webView findString:query
+       withConfiguration:_findConfiguration
+       completionHandler:^(WKFindResult * _Nonnull result) {
+        if (!result.matchFound) {
+            NSBeep();
+        }
+    }];
 }
 
 static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentController *userContentController, void (^loadHTMLContent)(void))
@@ -198,11 +181,13 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
         loadHTMLContent();
         return;
     }
-    
+
     NSString *encodedContentRuleList =
         @"[{\"trigger\": { \"url-filter\": \".*\" }, \"action\": { \"type\": \"block\" } }]";
-    
-    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"sparkle-updater" encodedContentRuleList:encodedContentRuleList completionHandler:^(WKContentRuleList *contentRuleList, NSError *contentRuleListError) {
+
+    [WKContentRuleListStore.defaultStore compileContentRuleListForIdentifier:@"sparkle-updater"
+                                                   encodedContentRuleList:encodedContentRuleList
+                                                        completionHandler:^(WKContentRuleList *contentRuleList, NSError *contentRuleListError) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (contentRuleList != nil) {
                 [userContentController addContentRuleList:contentRuleList];
@@ -215,8 +200,7 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
 - (void)loadString:(NSString *)htmlString baseURL:(NSURL * _Nullable)baseURL completionHandler:(void (^)(NSError * _Nullable))completionHandler
 {
     _completionHandler = [completionHandler copy];
-    _cachedPlainTextString = htmlString ?: @"";
-    
+
     SPULoadWebContent(_allowsLoadingExternalReferences, _webView.configuration.userContentController, ^{
         self->_currentNavigation = [self->_webView loadHTMLString:htmlString baseURL:baseURL];
     });
@@ -225,7 +209,6 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
 - (void)loadData:(NSData *)data MIMEType:(NSString *)MIMEType textEncodingName:(NSString *)textEncodingName baseURL:(NSURL *)baseURL completionHandler:(void (^)(NSError * _Nullable))completionHandler
 {
     _completionHandler = [completionHandler copy];
-    _cachedPlainTextString = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
 
     SPULoadWebContent(_allowsLoadingExternalReferences, _webView.configuration.userContentController, ^{
         self->_currentNavigation = [self->_webView loadData:data MIMEType:MIMEType characterEncodingName:textEncodingName baseURL:baseURL];
@@ -287,7 +270,7 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
     NSURL *requestURL = request.URL;
     BOOL isAboutBlank = NO;
     BOOL safeURL = SUReleaseNotesIsSafeURL(requestURL, _customAllowedURLSchemes, &isAboutBlank);
-    
+
     if (!safeURL) {
         SULog(SULogLevelDefault, @"Blocked display of %@ URL which may be dangerous", requestURL.scheme);
         decisionHandler(WKNavigationActionPolicyCancel);
@@ -300,52 +283,7 @@ static void SPULoadWebContent(BOOL allowsExternalReferences, WKUserContentContro
         } else {
             decisionHandler(WKNavigationActionPolicyAllow);
         }
-        
-        [webView evaluateJavaScript:@"document.body.innerText" completionHandler:^(NSString * _Nullable text, NSError * _Nullable error) {
-            if (text != nil) {
-                _cachedPlainTextString = text;
-            }
-        }];
     }
-}
-
-#pragma mark - NSTextFinderClient Methods
-
-- (NSString *)string {
-    return _cachedPlainTextString;
-}
-
-- (NSRange)firstSelectedRange {
-    return NSMakeRange(NSNotFound, 0);
-}
-
-- (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges {
-}
-
-- (NSArray<NSValue *> *)rectsForCharacterRange:(NSRange)characterRange {
-    return @[];
-}
-
-- (void)scrollRangeToVisible:(NSRange)range {
-}
-
-- (NSView *)contentViewAtIndex:(NSInteger)characterIndex effectiveRange:(NSRangePointer)outRange {
-    return _webView;
-}
-
-#pragma mark - Menu & Action Handling
-
-- (void)performFindPanelAction:(id)sender {
-    if ([sender respondsToSelector:@selector(tag)]) {
-        [_textFinder performAction:(NSTextFinderAction)[(__kindof NSView *)sender tag]];
-    }
-}
-
-- (BOOL)validateUserInterfaceItem:(id<NSValidatedUserInterfaceItem>)item {
-    if ([item action] == @selector(performFindPanelAction:)) {
-        return YES;
-    }
-    return NO;
 }
 
 @end
